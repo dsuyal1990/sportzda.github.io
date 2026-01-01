@@ -1,11 +1,19 @@
 import { test, expect, Page } from '@playwright/test';
 
 // Helper to extract BACKEND_BASE from inline script in bat-knocking.html
+// Now handles config.js pattern: const BACKEND_BASE = window.CONFIG?.BACKEND_BASE || 'http://localhost:3000'
 async function getBackendBase(page: Page): Promise<string> {
     const html = await page.content();
-    const match = html.match(/const\s+BACKEND_BASE\s*=\s*['\"]([^'\"]+)['\"]/);
-    if (!match) throw new Error('Could not find BACKEND_BASE in HTML');
-    return match[1];
+    
+    // Try new config pattern: const BACKEND_BASE = window.CONFIG?.BACKEND_BASE || 'fallback-url'
+    const configMatch = html.match(/const\s+BACKEND_BASE\s*=\s*window\.CONFIG\?\.[A-Z_]+\s*\|\|\s*['\"]([^'\"]+)['\"]/);
+    if (configMatch) return configMatch[1];
+    
+    // Fallback to old pattern for backwards compatibility
+    const oldMatch = html.match(/const\s+BACKEND_BASE\s*=\s*['\"]([^'\"]+)['\"]/);
+    if (oldMatch) return oldMatch[1];
+    
+    throw new Error('Could not find BACKEND_BASE in HTML');
 }
 
 test.describe('Bat Knocking UI Tests', () => {
@@ -22,19 +30,19 @@ test.describe('Bat Knocking UI Tests', () => {
             // Click Pay Now without filling anything
             await page.locator('#confirmButton').click();
 
-            // Verify alert shows missing fields (store has default value, so won't appear)
+            // Verify alert shows missing fields (store and payment method have default values, so won't appear)
             expect(alertMessage).toContain('Your name');
             expect(alertMessage).toContain('WhatsApp number');
-            expect(alertMessage).toContain('Payment method');
+            // Payment method now has default value (online), so it won't be in missing fields
         });
 
         test('Validates phone number format', async ({ page }) => {
             await page.goto('/bat-knocking.html?test=true');
 
-            // Fill everything except phone
+            // Fill everything except phone, but change payment to cash to avoid online payment flow
             await page.locator('#storeLocation').selectOption({ index: 1 });
             await page.locator('#customerName').fill('Test User');
-            await page.locator('#paymentMethod').selectOption('payatoutlet');
+            await page.locator('#paymentMethod').selectOption('payatoutlet'); // Use cash for simpler test
             const row = page.locator('.bat-card').first();
             await row.locator('.batModel').fill('MRF Genius');
             await row.locator('.packageType').selectOption('10000');
@@ -129,11 +137,11 @@ test.describe('Bat Knocking UI Tests', () => {
             await page.locator('#confirmButton').click();
             expect(alertMessage).toContain('Complete bat details');
 
-            // Fill package, test missing payment method
+            // Fill package, payment method already has default (online)
             await row.locator('.packageType').selectOption('10000');
             alertMessage = '';
-            await page.locator('#confirmButton').click();
-            expect(alertMessage).toContain('Payment method');
+            // Should now pass validation since payment method defaults to online
+            // Test would proceed to online payment flow
         });
 
         test.describe('Bat Management', () => {
@@ -334,9 +342,11 @@ test.describe('Bat Knocking UI Tests', () => {
                 const threadingBottom = row.locator('.threading-bottom');
                 const threadingBoth = row.locator('.threading-both');
 
-                // Check top and bottom
-                await threadingTop.check();
-                await threadingBottom.check();
+                // Scroll into view and check top and bottom
+                await threadingTop.scrollIntoViewIfNeeded();
+                await threadingTop.click();
+                await threadingBottom.scrollIntoViewIfNeeded();
+                await threadingBottom.click();
                 await expect(threadingTop).toBeChecked();
                 await expect(threadingBottom).toBeChecked();
 
@@ -360,12 +370,19 @@ test.describe('Bat Knocking UI Tests', () => {
                 const threadingTop = row.locator('.threading-top');
                 const threadingBoth = row.locator('.threading-both');
 
-                // Check both
-                await threadingBoth.check();
+                // Wait for checkboxes to be ready
+                await threadingBoth.waitFor({ state: 'visible' });
+                await threadingTop.waitFor({ state: 'visible' });
+
+                // Check both using setChecked (more reliable than check)
+                await threadingBoth.setChecked(true);
                 await expect(threadingBoth).toBeChecked();
 
+                // Wait a bit for any UI updates to settle
+                await page.waitForTimeout(100);
+
                 // Check top - should uncheck both
-                await threadingTop.check();
+                await threadingTop.setChecked(true);
                 await expect(threadingTop).toBeChecked();
                 await expect(threadingBoth).not.toBeChecked();
 
@@ -589,6 +606,19 @@ test.describe('Bat Knocking UI Tests', () => {
                 const secondVal = await optionAttrs[2].getAttribute('value');
                 expect((firstVal || '').toLowerCase()).toBe('online');
                 expect((secondVal || '').toLowerCase()).toBe('payatoutlet');
+            });
+
+            test('Online Payment is selected by default', async ({ page }) => {
+                await page.goto('/bat-knocking.html?test=true');
+                const select = page.locator('#paymentMethod');
+
+                // Check that online is the default selected value
+                const selectedValue = await select.inputValue();
+                expect(selectedValue).toBe('online');
+
+                // Check that the online option has the selected attribute
+                const onlineOption = select.locator('option[value="online"]');
+                await expect(onlineOption).toHaveAttribute('selected', '');
             });
 
             test('Pay at outlet flow creates order and redirects', async ({ page }) => {
@@ -910,7 +940,7 @@ test.describe('Bat Knocking UI Tests', () => {
                 await expect(notes).toBeVisible();
                 await expect(notes).toContainText('Important Service Notes');
                 await expect(notes).toContainText('Professional machine knocking');
-                await expect(notes).toContainText('3-5 days');
+                await expect(notes).toContainText('25 minutes to 3 hours');
             });
 
             test('Pricing table is collapsible', async ({ page }) => {
